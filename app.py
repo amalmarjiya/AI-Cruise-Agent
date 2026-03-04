@@ -26,14 +26,14 @@ import io
 # CONFIGURATION (USE ENV VARS - DO NOT HARDCODE SECRETS)
 # ============================================================================
 SUPABASE_URL = "https://qprqcxermzgogatflhgb.supabase.co"
-SUPABASE_KEY = "sb_publishable_vTU67Zk4YKUra8sO1RvHdA_W99cp9oY"
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # Pinecone credentials
-PINECONE_API_KEY = "pcsk_4q9EH3_Co8vSeprpjC8z3VXW4t7o2h5wETA5JbLkxpheQCqN7H9d53dCnuaSdHrcs7SfBS"
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX = "cruisematch"
 
 # LLMod.ai credentials
-LLMOD_API_KEY = "sk-fOZQxu3Tvk7vTxtZtd8jqA"
+LLMOD_API_KEY = os.environ.get("LLMOD_API_KEY")
 LLMOD_BASE_URL = "https://api.llmod.ai/v1"
 
 
