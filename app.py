@@ -840,63 +840,88 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
-
     <script>
-        function setExample(text) {
-            document.getElementById('prompt').value = text;
-        }
+  function setExample(text) {
+    document.getElementById('prompt').value = text;
+  }
 
-        async function runAgent() {
-            const prompt = document.getElementById('prompt').value.trim();
-            if (!prompt) {
-                alert('Please enter a prompt');
-                return;
-            }
+  async function runAgent() {
+    const prompt = document.getElementById('prompt').value.trim();
+    if (!prompt) {
+      alert('Please enter a prompt');
+      return;
+    }
 
-            const btn = document.getElementById('runBtn');
-            const loading = document.getElementById('loading');
-            const response = document.getElementById('response');
+    const btn = document.getElementById('runBtn');
+    const loading = document.getElementById('loading');
+    const response = document.getElementById('response');
 
-            btn.disabled = true;
-            loading.classList.add('visible');
-            response.classList.remove('visible');
+    btn.disabled = true;
+    loading.classList.add('visible');
+    response.classList.remove('visible');
 
-            try {
-                const res = await fetch('/api/execute', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt })
-                });
+    try {
+      const res = await fetch('/api/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
 
-                const data = await res.json();
+      // ✅ read as text first (works for JSON and HTML)
+      const raw = await res.text();
 
-                document.getElementById('responseText').textContent = data.response || data.error || 'No response';
+      let data = null;
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        // Not JSON -> show raw HTML/text so we know what's wrong
+        document.getElementById('responseText').textContent =
+          `Server returned non-JSON (status ${res.status}).\n\n` + raw.slice(0, 2000);
+        document.getElementById('steps').innerHTML = '';
+        loading.classList.remove('visible');
+        response.classList.add('visible');
+        return;
+      }
 
-                const stepsHtml = (data.steps || []).map(step => `
-                    <div class="step">
-                        <div class="step-header">${step.module}</div>
-                        <div class="step-content">
-                            <strong>Input:</strong>
-                            <pre>${JSON.stringify(step.prompt, null, 2)}</pre>
-                            <strong>Output:</strong>
-                            <pre>${JSON.stringify(step.response, null, 2)}</pre>
-                        </div>
-                    </div>
-                `).join('');
+      // ✅ If backend returned JSON but with error status
+      if (!res.ok) {
+        document.getElementById('responseText').textContent =
+          `Error (status ${res.status}): ` + (data.error || 'Unknown error');
+        document.getElementById('steps').innerHTML =
+          `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        loading.classList.remove('visible');
+        response.classList.add('visible');
+        return;
+      }
 
-                document.getElementById('steps').innerHTML = stepsHtml;
+      document.getElementById('responseText').textContent =
+        data.response || data.error || 'No response';
 
-                loading.classList.remove('visible');
-                response.classList.add('visible');
+      const stepsHtml = (data.steps || []).map(step => `
+        <div class="step">
+          <div class="step-header">${step.module}</div>
+          <div class="step-content">
+            <strong>Input:</strong>
+            <pre>${JSON.stringify(step.prompt, null, 2)}</pre>
+            <strong>Output:</strong>
+            <pre>${JSON.stringify(step.response, null, 2)}</pre>
+          </div>
+        </div>
+      `).join('');
 
-            } catch (err) {
-                alert('Error: ' + err.message);
-            } finally {
-                btn.disabled = false;
-                loading.classList.remove('visible');
-            }
-        }
-    </script>
+      document.getElementById('steps').innerHTML = stepsHtml;
+
+      loading.classList.remove('visible');
+      response.classList.add('visible');
+
+    } catch (err) {
+      alert('Error: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      loading.classList.remove('visible');
+    }
+  }
+</script>
 </body>
 </html>
 """
