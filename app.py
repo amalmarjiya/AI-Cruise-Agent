@@ -905,11 +905,5 @@ HTML_TEMPLATE = """
 # ============================================================================
 
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-    print("\n" + "=" * 60)
-    print("  🚢 CruiseMatch AI Agent Starting...")
-    print("=" * 60)
-    print(f"\n🌐 Starting server on port {port}")
-    print("=" * 60 + "\n")
