@@ -17,26 +17,20 @@ import time
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
-from supabase import create_client
-from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 import io
 
 # ============================================================================
 # CONFIGURATION (USE ENV VARS - DO NOT HARDCODE SECRETS)
 # ============================================================================
+
 SUPABASE_URL = "https://qprqcxermzgogatflhgb.supabase.co"
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Pinecone credentials
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX = "cruisematch"
 
-# LLMod.ai credentials
 LLMOD_API_KEY = os.environ.get("LLMOD_API_KEY")
 LLMOD_BASE_URL = "https://api.llmod.ai/v1"
-
-
 
 # ============================================================================
 # TEAM INFORMATION
@@ -48,8 +42,8 @@ TEAM_INFO = {
     "students": [
         {"name": "Sham Alem", "email": "sham.alem@campus.technion.ac.il"},
         {"name": "Amal Marjieh", "email": "amal.marjiya@campus.technion.ac.il"},
-        {"name": "Weaam Mulla", "email": "weaam.mulla@campus.technion.ac.il"}
-    ]
+        {"name": "Weaam Mulla", "email": "weaam.mulla@campus.technion.ac.il"},
+    ],
 }
 
 # ============================================================================
@@ -59,36 +53,52 @@ TEAM_INFO = {
 app = Flask(__name__)
 CORS(app)
 
+# ✅ Health endpoint so Render can verify the port quickly
+@app.get("/health")
+def health():
+    return "OK", 200
+
 # ============================================================================
-# INITIALIZE CLIENTS (Lazy loading)
+# INITIALIZE CLIENTS (TRUE lazy-loading: import libs only when needed)
 # ============================================================================
 
 _supabase = None
 _pinecone_index = None
 _embedding_model = None
 
-
 def get_supabase():
+    """Create Supabase client only when needed, and import only when needed."""
     global _supabase
     if _supabase is None:
+        from supabase import create_client  # moved here
+        if not SUPABASE_KEY:
+            raise RuntimeError("SUPABASE_KEY env var is missing")
         _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase
 
 
 def get_pinecone_index():
+    """Create Pinecone index client only when needed, and import only when needed."""
     global _pinecone_index
     if _pinecone_index is None:
+        from pinecone import Pinecone  # moved here
+        if not PINECONE_API_KEY:
+            raise RuntimeError("PINECONE_API_KEY env var is missing")
         pc = Pinecone(api_key=PINECONE_API_KEY)
         _pinecone_index = pc.Index(PINECONE_INDEX)
     return _pinecone_index
 
 
 def get_embedding_model():
+    """
+    Load embedding model only when needed.
+    This is the main one that can hang on startup if imported globally.
+    """
     global _embedding_model
     if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer  # moved here
         _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
-
 
 # ============================================================================
 # LLM FUNCTIONS
@@ -124,7 +134,6 @@ def call_llm(prompt, system_prompt=None, max_tokens=2000):
         return result["choices"][0]["message"]["content"]
     except Exception as e:
         return f"Error calling LLM: {str(e)}"
-
 
 # ============================================================================
 # AGENT MODULES
@@ -179,7 +188,6 @@ class CruiseSearcher:
                 pinecone_filter["region"] = {"$eq": filters["region"]}
             if filters.get("cabin_type"):
                 pinecone_filter["cabin_type"] = {"$eq": filters["cabin_type"]}
-            # IMPORTANT: keep booleans AS ASKED (do not relax them in ConstraintRelaxer)
             if filters.get("family_friendly") is True:
                 pinecone_filter["family_friendly"] = {"$eq": True}
             if filters.get("adults_only") is True:
@@ -197,13 +205,14 @@ class CruiseSearcher:
 
         cruise_results = []
         for match in results.matches:
-            cruise_results.append({
-                "cruise_id": match.metadata.get("cruise_id"),
-                "similarity_score": match.score,
-                "metadata": match.metadata,
-            })
+            cruise_results.append(
+                {
+                    "cruise_id": match.metadata.get("cruise_id"),
+                    "similarity_score": match.score,
+                    "metadata": match.metadata,
+                }
+            )
 
-        # If user asked budget/duration, filter via Supabase
         if filters and (
             filters.get("budget_max") is not None
             or filters.get("budget_min") is not None
@@ -274,17 +283,7 @@ class DestinationEvaluator:
         return result.data
 
 
-# ============================================================================
-# ✅ UPDATED MODULE: Constraint Relaxer (ADJUSTED AS DISCUSSED)
-# - Duration relax FIRST: -1, +1, -2, +2 (4 attempts total)
-# - Cabin type relax SECOND (downgrade step-by-step; can take multiple attempts)
-# - Budget relax THIRD: +25% ONLY ONCE
-# - Region relax LAST
-# - DO NOT relax booleans (family_friendly/adults_only) EVER
-# ============================================================================
-
 class ConstraintRelaxer:
-    # Fixed cabin downgrade ladder
     CABIN_ORDER = ["Penthouse Suite", "Suite", "Balcony", "Ocean View", "Inside"]
 
     @staticmethod
@@ -297,87 +296,67 @@ class ConstraintRelaxer:
 
     @staticmethod
     def relax(filters: dict, already_relaxed: set):
-        """
-        Returns: (new_filters, relax_info)
-        relax_info: {"changed": <field or None>, "from": <old>, "to": <new>, "rule": <string>}
-        """
         f = ConstraintRelaxer._normalize(filters)
 
-        # 1) DURATION FIRST (4 attempts total)
-        # a) duration_min -1
         if "duration_min_-1" not in already_relaxed and f.get("duration_min") is not None:
             old = int(f["duration_min"])
             f["duration_min"] = max(1, old - 1)
             already_relaxed.add("duration_min_-1")
             return f, {"changed": "duration_min", "from": old, "to": f["duration_min"], "rule": "duration -1"}
 
-        # b) duration_max +1
         if "duration_max_+1" not in already_relaxed and f.get("duration_max") is not None:
             old = int(f["duration_max"])
             f["duration_max"] = old + 1
             already_relaxed.add("duration_max_+1")
             return f, {"changed": "duration_max", "from": old, "to": f["duration_max"], "rule": "duration +1"}
 
-        # c) duration_min -2
         if "duration_min_-2" not in already_relaxed and f.get("duration_min") is not None:
             old = int(f["duration_min"])
             f["duration_min"] = max(1, old - 2)
             already_relaxed.add("duration_min_-2")
             return f, {"changed": "duration_min", "from": old, "to": f["duration_min"], "rule": "duration -2"}
 
-        # d) duration_max +2
         if "duration_max_+2" not in already_relaxed and f.get("duration_max") is not None:
             old = int(f["duration_max"])
             f["duration_max"] = old + 2
             already_relaxed.add("duration_max_+2")
             return f, {"changed": "duration_max", "from": old, "to": f["duration_max"], "rule": "duration +2"}
 
-        # 2) CABIN TYPE SECOND (downgrade step-by-step; can happen multiple times)
-        # Only if cabin_type is set
         if f.get("cabin_type") is not None:
             old = f["cabin_type"]
             if old in ConstraintRelaxer.CABIN_ORDER:
                 idx = ConstraintRelaxer.CABIN_ORDER.index(old)
-                # move one step down; if already at last, remove cabin constraint
                 if idx < len(ConstraintRelaxer.CABIN_ORDER) - 1:
                     f["cabin_type"] = ConstraintRelaxer.CABIN_ORDER[idx + 1]
                 else:
                     f["cabin_type"] = None
             else:
-                # unknown cabin type -> remove it
                 f["cabin_type"] = None
 
             return f, {"changed": "cabin_type", "from": old, "to": f["cabin_type"], "rule": "cabin downgrade"}
 
-        # (Optional) keep your old "drop cruise_line" step (not discussed to remove),
-        # but do it BEFORE budget and BEFORE region.
         if "cruise_line_drop" not in already_relaxed and f.get("cruise_line") is not None:
             old = f["cruise_line"]
             f["cruise_line"] = None
             already_relaxed.add("cruise_line_drop")
             return f, {"changed": "cruise_line", "from": old, "to": None, "rule": "drop cruise_line"}
 
-        # 3) BUDGET THIRD: +25% ONLY ONCE (never decrease)
         if "budget_+25" not in already_relaxed and f.get("budget_max") is not None:
             old = int(f["budget_max"])
             f["budget_max"] = int(old * 1.25)
             already_relaxed.add("budget_+25")
             return f, {"changed": "budget_max", "from": old, "to": f["budget_max"], "rule": "budget +25% (once)"}
 
-        # 4) REGION LAST
         if "region_drop" not in already_relaxed and f.get("region") is not None:
             old = f["region"]
             f["region"] = None
             already_relaxed.add("region_drop")
             return f, {"changed": "region", "from": old, "to": None, "rule": "drop region (last resort)"}
 
-        # DO NOT relax booleans (family_friendly/adults_only) — keep them as requested
         return f, {"changed": None}
 
 
 class ResponseGenerator:
-    """Module 4: Generate final response using LLM"""
-
     @staticmethod
     def generate(user_query, cruises, destination_scores=None):
         system_prompt = """You are a friendly cruise travel advisor. Based on the search results provided,
@@ -420,8 +399,6 @@ Please provide a helpful recommendation based on these options."""
 
 
 class CruiseMatchAgent:
-    """Main Agent orchestrating all modules"""
-
     def __init__(self):
         self.query_parser = QueryParser()
         self.cruise_searcher = CruiseSearcher()
@@ -434,33 +411,34 @@ class CruiseMatchAgent:
         start_time = time.time()
 
         try:
-            # Step 1: Parse Query
             step1_start = time.time()
             parsed_params = self.query_parser.parse(user_prompt)
-            steps.append({
-                "module": "QueryParser",
-                "prompt": {"user_query": user_prompt},
-                "response": parsed_params,
-                "duration_ms": int((time.time() - step1_start) * 1000),
-            })
+            steps.append(
+                {
+                    "module": "QueryParser",
+                    "prompt": {"user_query": user_prompt},
+                    "response": parsed_params,
+                    "duration_ms": int((time.time() - step1_start) * 1000),
+                }
+            )
 
-            # Step 2: Search Cruises (initial)
             step2_start = time.time()
             cruises = self.cruise_searcher.search(user_prompt, parsed_params)
-            steps.append({
-                "module": "CruiseSearcher",
-                "prompt": {"query": user_prompt, "filters": parsed_params},
-                "response": {"num_results": len(cruises), "top_cruises": cruises[:3]},
-                "duration_ms": int((time.time() - step2_start) * 1000),
-            })
+            steps.append(
+                {
+                    "module": "CruiseSearcher",
+                    "prompt": {"query": user_prompt, "filters": parsed_params},
+                    "response": {"num_results": len(cruises), "top_cruises": cruises[:3]},
+                    "duration_ms": int((time.time() - step2_start) * 1000),
+                }
+            )
 
-            # ✅ UPDATED: Relaxation loop (fixed order + no boolean relax + budget +25% once)
             relax_attempts = 0
             current_filters = dict(parsed_params or {})
             already_relaxed = set()
 
             TARGET_MIN_RESULTS = 3
-            MAX_RELAX_ATTEMPTS = 12  # as you wanted (can show more steps for grading)
+            MAX_RELAX_ATTEMPTS = 12
 
             while (not cruises or len(cruises) < TARGET_MIN_RESULTS) and relax_attempts < MAX_RELAX_ATTEMPTS:
                 relax_attempts += 1
@@ -468,28 +446,32 @@ class CruiseMatchAgent:
 
                 new_filters, relax_info = self.constraint_relaxer.relax(current_filters, already_relaxed)
 
-                steps.append({
-                    "module": "ConstraintRelaxer",
-                    "prompt": current_filters,
-                    "response": {
-                        "attempt": relax_attempts,
-                        "relax_info": relax_info,
-                        "new_filters": new_filters,
-                    },
-                    "duration_ms": int((time.time() - r_start) * 1000),
-                })
+                steps.append(
+                    {
+                        "module": "ConstraintRelaxer",
+                        "prompt": current_filters,
+                        "response": {
+                            "attempt": relax_attempts,
+                            "relax_info": relax_info,
+                            "new_filters": new_filters,
+                        },
+                        "duration_ms": int((time.time() - r_start) * 1000),
+                    }
+                )
 
                 if relax_info.get("changed") is None:
                     break
 
                 s_start = time.time()
                 cruises = self.cruise_searcher.search(user_prompt, new_filters)
-                steps.append({
-                    "module": "CruiseSearcher(Relaxed)",
-                    "prompt": {"query": user_prompt, "filters": new_filters},
-                    "response": {"num_results": len(cruises), "top_cruises": cruises[:3]},
-                    "duration_ms": int((time.time() - s_start) * 1000),
-                })
+                steps.append(
+                    {
+                        "module": "CruiseSearcher(Relaxed)",
+                        "prompt": {"query": user_prompt, "filters": new_filters},
+                        "response": {"num_results": len(cruises), "top_cruises": cruises[:3]},
+                        "duration_ms": int((time.time() - s_start) * 1000),
+                    }
+                )
 
                 current_filters = new_filters
 
@@ -506,35 +488,42 @@ class CruiseMatchAgent:
                     "execution_time_ms": total_time,
                 }
 
-            # Step 3: Evaluate Destinations (if experience type specified)
             if parsed_params.get("experience_type") and cruises:
                 step3_start = time.time()
-                countries = list(set([
-                    c.get("departure_country") or c.get("metadata", {}).get("departure_country")
-                    for c in cruises[:10] if c
-                ]))
+                countries = list(
+                    set(
+                        [
+                            c.get("departure_country") or c.get("metadata", {}).get("departure_country")
+                            for c in cruises[:10]
+                            if c
+                        ]
+                    )
+                )
                 countries = [c for c in countries if c]
 
                 dest_scores = self.destination_evaluator.evaluate(
                     countries,
                     parsed_params.get("experience_type"),
                 )
-                steps.append({
-                    "module": "DestinationEvaluator",
-                    "prompt": {"countries": countries, "experience_type": parsed_params.get("experience_type")},
-                    "response": dest_scores,
-                    "duration_ms": int((time.time() - step3_start) * 1000),
-                })
+                steps.append(
+                    {
+                        "module": "DestinationEvaluator",
+                        "prompt": {"countries": countries, "experience_type": parsed_params.get("experience_type")},
+                        "response": dest_scores,
+                        "duration_ms": int((time.time() - step3_start) * 1000),
+                    }
+                )
 
-            # Step 4: Generate Response
             step4_start = time.time()
             response_text = self.response_generator.generate(user_prompt, cruises)
-            steps.append({
-                "module": "ResponseGenerator",
-                "prompt": {"user_query": user_prompt, "num_cruises": len(cruises)},
-                "response": {"generated_text": (response_text[:200] + "...") if response_text else ""},
-                "duration_ms": int((time.time() - step4_start) * 1000),
-            })
+            steps.append(
+                {
+                    "module": "ResponseGenerator",
+                    "prompt": {"user_query": user_prompt, "num_cruises": len(cruises)},
+                    "response": {"generated_text": (response_text[:200] + "...") if response_text else ""},
+                    "duration_ms": int((time.time() - step4_start) * 1000),
+                }
+            )
 
             total_time = int((time.time() - start_time) * 1000)
 
@@ -555,7 +544,6 @@ class CruiseMatchAgent:
             }
 
 
-# Initialize agent
 agent = CruiseMatchAgent()
 
 # ============================================================================
@@ -574,25 +562,36 @@ def team_info():
 
 @app.route("/api/agent_info", methods=["GET"])
 def agent_info():
-    return jsonify({
-        "description": "CruiseMatch AI is an autonomous cruise recommendation agent that helps travelers find the perfect cruise based on their preferences, budget, and desired experiences.",
-        "purpose": "To solve the problem of cruise selection by evaluating both the cruise itself (price, duration, cabin type) and the travel experience offered by departure/arrival locations (culture, nature, adventure).",
-        "prompt_template": {
-            "template": "Find me a {experience_type} cruise to {region} for {duration} nights under ${budget} with {cabin_type} cabin",
-        },
-        "prompt_examples": [
-            {
-                "prompt": "Find me a romantic Caribbean cruise under $2000 for 7 nights",
-                "full_response": "Based on your preferences for a romantic Caribbean getaway under $2000 for 7 nights, I recommend: 1) Royal Caribbean's Symphony of the Seas - 7 nights, Balcony cabin at $1,850...",
-                "steps": [
-                    {"module": "QueryParser", "prompt": {}, "response": {"budget_max": 2000, "region": "Caribbean", "duration_max": 7, "experience_type": "romantic"}},
-                    {"module": "CruiseSearcher", "prompt": {}, "response": {"num_results": 15}},
-                    {"module": "DestinationEvaluator", "prompt": {}, "response": {}},
-                    {"module": "ResponseGenerator", "prompt": {}, "response": {}},
-                ],
-            }
-        ],
-    })
+    return jsonify(
+        {
+            "description": "CruiseMatch AI is an autonomous cruise recommendation agent that helps travelers find the perfect cruise based on their preferences, budget, and desired experiences.",
+            "purpose": "To solve the problem of cruise selection by evaluating both the cruise itself (price, duration, cabin type) and the travel experience offered by departure/arrival locations (culture, nature, adventure).",
+            "prompt_template": {
+                "template": "Find me a {experience_type} cruise to {region} for {duration} nights under ${budget} with {cabin_type} cabin",
+            },
+            "prompt_examples": [
+                {
+                    "prompt": "Find me a romantic Caribbean cruise under $2000 for 7 nights",
+                    "full_response": "Based on your preferences for a romantic Caribbean getaway under $2000 for 7 nights, I recommend: 1) Royal Caribbean's Symphony of the Seas - 7 nights, Balcony cabin at $1,850...",
+                    "steps": [
+                        {
+                            "module": "QueryParser",
+                            "prompt": {},
+                            "response": {
+                                "budget_max": 2000,
+                                "region": "Caribbean",
+                                "duration_max": 7,
+                                "experience_type": "romantic",
+                            },
+                        },
+                        {"module": "CruiseSearcher", "prompt": {}, "response": {"num_results": 15}},
+                        {"module": "DestinationEvaluator", "prompt": {}, "response": {}},
+                        {"module": "ResponseGenerator", "prompt": {}, "response": {}},
+                    ],
+                }
+            ],
+        }
+    )
 
 
 @app.route("/api/model_architecture", methods=["GET"])
@@ -637,16 +636,15 @@ def model_architecture():
             draw.rectangle([x1, y1, x2, y2], fill=color, outline="black", width=2)
             draw.text((x1 + 10, y1 + 10), text, fill="black", font=font)
 
-        # arrows
         for i in range(len(modules) - 1):
             y = modules[i][3]
             draw.line([(210, y), (210, y + 20)], fill="black", width=2)
             draw.polygon([(205, y + 15), (215, y + 15), (210, y + 20)], fill="black")
 
-        draw.line([(340, 270), (540, 250)], fill="green", width=2)  # search -> pinecone
-        draw.line([(340, 270), (540, 340)], fill="green", width=2)  # search -> supabase
-        draw.line([(340, 190), (540, 430)], fill="blue", width=2)   # parser -> llm
-        draw.line([(340, 510), (540, 430)], fill="blue", width=2)   # generator -> llm
+        draw.line([(340, 270), (540, 250)], fill="green", width=2)
+        draw.line([(340, 270), (540, 340)], fill="green", width=2)
+        draw.line([(340, 190), (540, 430)], fill="blue", width=2)
+        draw.line([(340, 510), (540, 430)], fill="blue", width=2)
 
         img_bytes = io.BytesIO()
         img.save(img_bytes, format="PNG")
@@ -662,41 +660,44 @@ def execute():
     try:
         data = request.get_json()
         if not data or "prompt" not in data:
-            return jsonify({
-                "status": "error",
-                "error": "Missing 'prompt' in request body",
-                "response": None,
-                "steps": [],
-            }), 400
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "error": "Missing 'prompt' in request body",
+                        "response": None,
+                        "steps": [],
+                    }
+                ),
+                400,
+            )
 
         user_prompt = data["prompt"]
         result = agent.execute(user_prompt)
 
-        # optional logging
         try:
             supabase = get_supabase()
-            supabase.table("agent_logs").insert({
-                "session_id": str(time.time()),
-                "user_prompt": user_prompt,
-                "agent_response": result.get("response"),
-                "steps": json.dumps(result.get("steps", [])),
-                "status": result.get("status"),
-                "error_message": result.get("error"),
-                "execution_time_ms": result.get("execution_time_ms"),
-            }).execute()
+            supabase.table("agent_logs").insert(
+                {
+                    "session_id": str(time.time()),
+                    "user_prompt": user_prompt,
+                    "agent_response": result.get("response"),
+                    "steps": json.dumps(result.get("steps", [])),
+                    "status": result.get("status"),
+                    "error_message": result.get("error"),
+                    "execution_time_ms": result.get("execution_time_ms"),
+                }
+            ).execute()
         except Exception:
             pass
 
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "response": None,
-            "steps": [],
-        }), 500
-
+        return (
+            jsonify({"status": "error", "error": str(e), "response": None, "steps": []}),
+            500,
+        )
 
 # ============================================================================
 # FRONTEND
@@ -900,6 +901,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -907,3 +909,9 @@ HTML_TEMPLATE = """
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+# ============================================================================
+# FRONTEND
+# ============================================================================
+
